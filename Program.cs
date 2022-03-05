@@ -19,6 +19,7 @@ namespace QQChatRecordsToTable
         public static readonly Regex TimeR = new Regex(@"^(?<time>\w{4}\-\w{2}\-\w{2} [0-2]?\w:\w{2}:\w{2}) (?<name>.+)", RegexOptions.Compiled);
 
         public static string Input { get; set; } = "全部消息记录.txt";
+        public static string Type { get; set; } = "QQ";
         public static string OutputDir { get; set; } = "output";
         public static string OutputFileName { get; set; } = "{Group}-{Name}.csv";
         public static bool IgnoreEmpty { get; set; } = false;
@@ -30,7 +31,12 @@ namespace QQChatRecordsToTable
             try
             {
                 InitializeConfigs();
-                var chats = ParseRecords();
+                List<Chat> chats = Type switch
+                {
+                    "QQ" => ParseQQRecords(),
+                    "WeChat" => ParseWeChatRecords(),
+                    _ => throw new NotSupportedException("未知类型：" + Type),
+                };
                 WriteToCsv(chats);
                 Process.Start(new ProcessStartInfo()
                 {
@@ -62,6 +68,9 @@ namespace QQChatRecordsToTable
                 {
                     switch (parts[0])
                     {
+                        case nameof(Type):
+                            Type = parts[1];
+                            break;
                         case nameof(Input):
                             Input = parts[1];
                             break;
@@ -93,7 +102,77 @@ namespace QQChatRecordsToTable
             }
         }
 
-        public static List<Chat> ParseRecords()
+        public static List<Chat> ParseWeChatRecords()
+        {
+            if (!Directory.Exists(Input))
+            {
+                throw new DirectoryNotFoundException(Input);
+            }
+            var files = Directory.EnumerateFiles(Input, "*.txt").ToArray();
+            if (files.Length == 0)
+            {
+                throw new FileNotFoundException("目录为空");
+            }
+            Regex rMessage = new Regex(@"(.+)\((20\w{2}-[01]\w-\w{2} [012]\w:[0-5]\w:[0-5]\w)\):(.+)");
+            Regex rMessage2 = new Regex(@"(.+) (20\w{2}-[01]\w-\w{2} [012]\w:[0-5]\w:[0-5]\w):(.+)");
+            Regex rWithdrew = new Regex(@"\""(.+)\"" 撤回了一条消息");
+            List<Chat> chats = new List<Chat>();
+            foreach (var file in files)
+            {
+
+                List<Message> messages = new List<Message>();
+                chats.Add(new Chat()
+                {
+                    Name = Path.GetFileNameWithoutExtension(file),
+                    Messages = messages,
+                });
+                Console.WriteLine($"正在解析{chats[^1].Name}");
+
+                foreach (var line in File.ReadLines(file))
+                {
+                    if (rMessage.IsMatch(line))
+                    {
+                        var match = rMessage.Match(line);
+
+                        messages.Add(new Message()
+                        {
+                            Name = match.Groups[1].Value,
+                            Time = DateTime.Parse(match.Groups[2].Value),
+                        });
+                        messages[^1].AppendLine(match.Groups[3].Value);
+                    }
+                    else if (rMessage2.IsMatch(line))
+                    {
+                        var match = rMessage2.Match(line);
+
+                        messages.Add(new Message()
+                        {
+                            Name = match.Groups[1].Value,
+                            Time = DateTime.Parse(match.Groups[2].Value),
+                        });
+                        messages[^1].AppendLine(match.Groups[3].Value);
+                    }
+                    else if (rWithdrew.IsMatch(line))
+                    {
+                        var match = rWithdrew.Match(line);
+                        messages.Add(new Message()
+                        {
+                            Name = match.Groups[1].Value,
+                        });
+                        messages[^1].AppendLine("撤回了一条消息");
+                    }
+                    else if (messages.Any())
+                    {
+                        messages[^1].AppendLine(line);
+                    }
+                }
+
+            }
+
+            return chats;
+        }
+
+        public static List<Chat> ParseQQRecords()
         {
             int lineIndex = 0;
             int splitCount = 0;
@@ -199,17 +278,15 @@ namespace QQChatRecordsToTable
                 string path = Path.Combine(OutputDir, GetLegalName(OutputFileName.Replace("{Group}", chat.Group).Replace("{Name}", chat.Name)));
                 CsvConfiguration config = new CsvConfiguration(CultureInfo.CurrentCulture);
                 //config.NewLine = Environment.NewLine;
-                using (var writer = new StreamWriter(path, false, new UTF8Encoding(true)))
-                using (var csv = new CsvWriter(writer, config))
+                using var writer = new StreamWriter(path, false, new UTF8Encoding(true));
+                using var csv = new CsvWriter(writer, config);
+                csv.Context.RegisterClassMap<MessageMap>();
+                var messages = chat.Messages;
+                if (IgnoreEmpty)
                 {
-                    csv.Context.RegisterClassMap<MessageMap>();
-                    var messages = chat.Messages;
-                    if (IgnoreEmpty)
-                    {
-                        messages = chat.Messages.Where(p => !string.IsNullOrEmpty(p.Content)).ToList();
-                    }
-                    csv.WriteRecords(chat.Messages);
+                    messages = chat.Messages.Where(p => !string.IsNullOrEmpty(p.Content)).ToList();
                 }
+                csv.WriteRecords(chat.Messages);
             }
         }
 
@@ -227,7 +304,7 @@ namespace QQChatRecordsToTable
     {
         public MessageMap()
         {
-            Map(p => p.Time).Index(0).Name("时间");
+            Map(p => p.TimeString).Index(0).Name("时间");
             Map(p => p.Name).Index(0).Name("发送者");
             Map(p => p.Content).Index(0).Name("内容");
         }
@@ -260,6 +337,14 @@ namespace QQChatRecordsToTable
                     str.Remove(str.Length - 1, 1);
                 }
                 return str.ToString();
+            }
+        }
+
+        public string TimeString
+        {
+            get
+            {
+                return Time == default ? "" : Time.ToString();
             }
         }
     }
